@@ -14,6 +14,9 @@
 using namespace std;
 
 map<string,string> apiBackendUrls;
+map<string,bool> apiKeyRequired;
+
+string apiKey = "";
 
 size_t saveReplyDataToStringStream(void *data, size_t size, size_t blocks, void *targetPtr) {
     stringstream& ss = *(stringstream*)targetPtr;
@@ -32,6 +35,13 @@ crow::json::wvalue apiBackendRequest(const string& apiName, const crow::json::rv
     if(targetUrlItr == apiBackendUrls.end()) {
         ret["code"] = 1;
         return ret;
+    }
+
+    if(apiKeyRequired[apiName]) {
+        if(apiKey == "" || !reqData.has("key") || reqData["key"] != apiKey) {
+            ret["code"] = 403;
+            return ret;
+        }
     }
 
     string targetUrl = targetUrlItr -> second;
@@ -86,6 +96,19 @@ void loadBackendUrls(ifstream cfg) {
         if(itr->t() != crow::json::type::String) {
             throw runtime_error("Bad data type");
         }
+
+        if(itr->key().size() < 1) {
+            throw runtime_error("Invalid key length");
+        }
+
+        if(itr->key() == "@apiKey") {
+            apiKey = itr->s();
+            continue;
+        }
+
+        if(((string)itr->key())[0] == '_') apiKeyRequired[itr->key()] = true;
+        else apiKeyRequired[itr->key()] = false;
+
         apiBackendUrls[itr->key()] = itr->s();
     }
 }
@@ -142,6 +165,6 @@ int main(int argc, char *argv[]) {
         resp.body = crow::json::dump(retJson);
         return resp;
     });
-    app.port(2333).multithreaded().run();
+    app.port(6070).multithreaded().run();
     return 0;
 }
