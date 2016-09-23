@@ -1,10 +1,10 @@
-var express = require("express");
 var crypto = require("crypto");
 var process = require("process");
 var http = require("http");
 var fs = require("fs");
 var iconv = require("iconv-lite");
 var querystring = require("querystring");
+var apihub = require("./APIHubConnector.js");
 
 var turingBotKey = "";
 
@@ -49,8 +49,6 @@ function turingBotRequest(userHash, msg, callback) {
     newRequest.end();
 }
 
-var app = express();
-
 var cfg = JSON.parse(fs.readFileSync("MicroService_qqGroupBot_config.json"));
 
 turingBotKey = cfg.turingBotKey;
@@ -59,17 +57,11 @@ if(!turingBotKey || typeof(turingBotKey) != "string") {
     process.exit(1);
 }
 
-app.post("/msgInput",function(req,resp) {
-    var reqRawData = "";
-
-    req.on("data",function(dt) {
-        reqRawData += dt;
-    });
-    req.on("end",function() {
+function onMsgInput(reqRawData,callback) {
         try {
             var reqData = JSON.parse(reqRawData,"utf-8");
         } catch(e) {
-            resp.send("Unable to parse request data");
+            callback("Unable to parse request data");
             return;
         }
 
@@ -82,26 +74,25 @@ app.post("/msgInput",function(req,resp) {
 
             var msg = reqData.msg;
         } catch(e) {
-            resp.send("Invalid values");
+            callback("Invalid values");
             return;
         }
 
         if(!userId || !groupId || !msg) {
-            resp.send("Missing values");
+            callback("Missing values");
             return;
         }
 
         if(typeof(msg) != "string") {
-            resp.send("Invalid message value type");
+            callback("Invalid message value type");
             return;
         }
 
         turingBotRequest(crypto.createHash("sha256").update(userId.toString() + groupId.toString()).digest("hex").substring(0,8),msg,function(rv) {
-            resp.send(rv);
+            callback(rv);
         });
-    });
-});
+}
 
-var server = app.listen(6094,function() {
-    console.log("Server listening on %s:%s",server.address().address,server.address().port);
-});
+apihub.init(["qqGroupMsgInput"],function(reqData,callback) {
+    return onMsgInput(reqData.requestData,callback);
+})
