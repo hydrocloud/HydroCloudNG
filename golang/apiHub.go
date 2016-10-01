@@ -4,9 +4,9 @@ import (
     "log"
     "net"
     "time"
-    "io"
     "os"
     "strings"
+    "strconv"
     "encoding/json"
     "io/ioutil"
     "net/http"
@@ -29,6 +29,8 @@ func handleConn(conn net.Conn) {
     const recvCommandBufferLength = 64
     const recvDataBufferLength = 8192
 
+    conn.SetDeadline(time.Now().Add(10*time.Second))
+
     conn.Write([]byte("HELLO\n"))
 
     cmdBuf := make([]byte,recvCommandBufferLength)
@@ -48,22 +50,15 @@ func handleConn(conn net.Conn) {
 
     conn.Write([]byte("DATA REQUEST\n"))
 
-    data := make([]byte,0)
-
     dataBuf := make([]byte,recvDataBufferLength)
 
-    for {
-        length,err = conn.Read(dataBuf)
-        if err != nil && err != io.EOF {
-            conn.Write([]byte("Error: Unable to read data\n"))
-            conn.Close()
-            return
-        }
-        data = append(data,dataBuf[:length]...)
-        if length != recvDataBufferLength {
-            break
-        }
+    length,err = conn.Read(dataBuf)
+    if err != nil || length <= 0 {
+        conn.Write([]byte("Error: Unable to read data\n"))
+        conn.Close()
+        return
     }
+    data := dataBuf[:length]
 
     dataParsed := make([]string,0)
 
@@ -94,16 +89,79 @@ func handleConn(conn net.Conn) {
             continue
         }
 
-        conn.Write([]byte(reqBody.Request))
+        /*
+
+        const blockSize = 8192;
+
+        reqLen := len(reqBody.Request)
+
+        fullBlocks := reqLen / blockSize
+
+        remainingBlockSize := reqLen - blockSize * fullBlocks
+
+        log.Printf("[DEBUG] Blocks: %d*%d + %d\n",blockSize,fullBlocks,remainingBlockSize)
+
+        */
+
+        reqLen := len(reqBody.Request)
+
+        reqBytes := []byte(reqBody.Request)
+
+        conn.SetDeadline(time.Now().Add(10*time.Second))
+
+        _,err = conn.Write([]byte(strconv.Itoa(reqLen)))
+        if err!=nil {
+            log.Println("Unable to send data. Closing connection.")
+            conn.Close()
+            return
+        }
+
+        _,err = conn.Read(cmdBuf)
+        if err!=nil {
+            log.Println("Unable to read response. Closing connection.")
+            conn.Close()
+            return
+        }
+
+
+        _,err = conn.Write(reqBytes)
+        if err!=nil {
+            log.Println("Unable to send data. Closing connection.")
+            conn.Close()
+            return
+        }
+
+
+        /*
+        for i:=0;i<fullBlocks;i++ {
+            _,err = conn.Write(reqBytes[blockSize*i:blockSize*(i+1)])
+            if err!=nil {
+                log.Println("Unable to send data. Closing connection.")
+                conn.Close()
+                return
+            }
+
+        }
+
+        if remainingBlockSize > 0 {
+            _,err = conn.Write(reqBytes[blockSize*fullBlocks:])
+            if err!=nil {
+                log.Println("Unable to send data. Closing connection.")
+                conn.Close()
+                return
+            }
+        }
+        */
 
         resp := make([]byte,0)
         respBuf := make([]byte,recvDataBufferLength)
 
         for {
             length,err = conn.Read(respBuf)
-            if err != nil && err != io.EOF {
-                conn.Write([]byte("Error: Unable to read data\n"))
-                break
+            if err != nil {
+                log.Println("Unable to read response. Closing connection.")
+                conn.Close()
+                return
             }
             resp = append(resp,respBuf[:length]...)
             if length != recvDataBufferLength {
@@ -157,9 +215,21 @@ func startHttpListener() {
         hReq.Request = string(reqJson)
         hReq.Response = apiResponse
 
-        targetHandler <- hReq
-
-        w.Write([]byte(<-apiResponse))
+        select {
+            case targetHandler <- hReq:
+                select {
+                    case apiRespStr := <-apiResponse:
+                        w.Write([]byte(apiRespStr))
+                        break
+                    case <-time.After(10*time.Second):
+                        w.Write([]byte("Handler timeout"))
+                        break
+                }
+                break
+            case <-time.After(10*time.Second):
+                w.Write([]byte("Handler timeout"))
+                break
+        }
     });
 
     http.ListenAndServe(":6066",nil)

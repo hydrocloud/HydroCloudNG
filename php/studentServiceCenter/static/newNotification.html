@@ -1,0 +1,51 @@
+<script>
+    function updateNotification() {
+        var targetClassId = parseInt($("#targetClassId").val());
+        var content = $("#notificationContent").val();
+        $.post("../updateNotification.php",JSON.stringify({
+            "targetClassId": targetClassId,
+            "message": content
+        }),function(resp) {
+            alert(resp);
+        });
+    }
+    function showUploadFile() {
+        $("#fileUploader_targetClassId").val($("#targetClassId").val());
+        $("#fileUploader_token").val(Math.floor(Math.random()*10000000).toString());
+        $("#fileUploader").show();
+    }
+</script>
+
+<style>
+    #submit-button {
+        background-color: #0077DD;
+        color: #FFFFFF;
+        margin-bottom: -10px;
+        margin-left: -10px;
+        margin-right: -10px;
+        width: 100% + 20px;
+        height: 50px;
+        text-align: center;
+        line-height: 50px;
+    }
+</style>
+
+
+<input type="text" id="targetClassId" style="width:100%" placeholder="班级编号" /><br>
+<br>
+
+<textarea id="notificationContent" style="width:100%" rows="10" placeholder="通知内容"></textarea>
+<br><br>
+
+<div id="submit-button" onclick="updateNotification()">发送</div>
+
+<div id="submit-button" style="background-color:#DD3333" onclick="showUploadFile()">上传文件</div>
+
+<form id="fileUploader" method="POST" action="../uploadFile.php" enctype="multipart/form-data" style="display:none;margin-top:30px">
+    <input type="hidden" name="targetClassId" id="fileUploader_targetClassId" />
+    <input type="hidden" name="token" id="fileUploader_token" />
+    <input type="file" name="file" />
+    <input type="submit" value="上传" />
+</form>
+
+<iframe id="fileUploaderTarget" width="0" height="0" style="display:none"></iframe>

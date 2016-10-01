@@ -3,55 +3,18 @@ var process = require("process");
 var http = require("http");
 var fs = require("fs");
 var querystring = require("querystring");
-var apihub = require("./APIHubConnector.js");
+var randomstring = require("randomstring");
+var dbClient = require("mongodb").MongoClient;
+
+var apihub = require("../APIHubConnector.js");
 var kwdetector = require("./qqGroupBot_kwDetector.js");
+var studentServiceCenter = require("./qqGroupBot_studentServiceCenter.js");
 
 var turingBotKey = "";
 
-var actionQueue = [];
+var dbContext = null;
 
-var recentMessages = [];
-
-function queueAction(actionName, actionArgs) {
-    actionQueue.push({
-        name: actionName,
-        args: actionArgs
-    });
-}
-
-function sendGroupMessage(groupId, content) {
-    queueAction("sendGroupMessage",{
-        "groupId": groupId,
-        "msg": content
-    });
-}
-module.exports.sendGroupMessage = sendGroupMessage;
-
-function shutupGroupMember(groupId, userId, duration) {
-    queueAction("shutupGroupMember",{
-        "groupId": groupId,
-        "userId": userId,
-        "duration": duration
-    });
-}
-module.exports.shutupGroupMember = shutupGroupMember;
-
-function setMemberCard(groupId, userId, content) {
-    queueAction("setMemberCard",{
-        "groupId": groupId,
-        "userId": userId,
-        "content": content
-    });
-}
-module.exports.setMemberCard = setMemberCard;
-
-function flushActionQueue() {
-    var resp = JSON.stringify(actionQueue);
-    actionQueue = [];
-    return resp;
-}
-
-function turingBotRequest(userHash, msg, callback) {
+function turingBotRequest(userHash, msg, callback, callbackArg) {
     var reqData = {
         key: turingBotKey,
         info: msg,
@@ -78,14 +41,14 @@ function turingBotRequest(userHash, msg, callback) {
                 var retData = JSON.parse(data);
                 var retText = retData.text;
             } catch(e) {
-                callback("聊天回复接口请求失败。");
+                callback("聊天回复接口请求失败。",callbackArg);
                 return;
             }
             if(!retText) {
-                callback("未获取到回复文本。");
+                callback("未获取到回复文本。",callbackArg);
                 return;
             }
-            callback(retText);
+            callback(retText,callbackArg);
         });
     });
     newRequest.write(reqAsString);
@@ -100,102 +63,258 @@ if(!turingBotKey || typeof(turingBotKey) != "string") {
     process.exit(1);
 }
 
-function onFlushActionQueue(callback) {
-    callback(flushActionQueue());
-}
+function RemoteTarget() {
+    this.actionQueue = [];
 
-var specialPatts = [
-    {
-        pattern: new RegExp("禁言"),
-        handler: kwdetector.doShutupGroupMemberOnKw
-    }
-];
+    this.recentMessages = [];
 
-function onMsgInput(reqRawData) {
-        try {
-            var reqData = JSON.parse(reqRawData,"utf-8");
-        } catch(e) {
-            return;
-        }
-
-        try {
-            if(typeof(reqData.userId) != "number") var userId = parseInt(reqData.userId);
-            else var userId = reqData.userId;
-
-            if(typeof(reqData.groupId) != "number") var groupId = parseInt(reqData.groupId);
-            else var groupId = reqData.groupId;
-
-            var msg = reqData.msg;
-        } catch(e) {
-            return;
-        }
-
-        if(!userId || !groupId || !msg) {
-            return;
-        }
-
-        if(typeof(msg) != "string") {
-            sendGroupMessage(groupId, "Invalid message value type");
-            return;
-        }
-
-        var currentUserId = groupId.toString() + "#" + userId.toString();
-
-        recentMessages.push({
-            user: currentUserId,
-            msg: msg
+    this.queueAction = function(actionName, actionArgs) {
+        this.actionQueue.push({
+            name: actionName,
+            args: actionArgs
         });
+    };
 
-        var equalCount = 0;
+    this.sendGroupMessage = function(groupId, content) {
+        console.log("[SEND] ["+groupId.toString()+"] "+content);
+        this.queueAction("sendGroupMessage",{
+            "groupId": groupId,
+            "msg": content
+        });
+    };
 
-        if(recentMessages.length >= 1) {
-            var prevMsg = null;
+    this.shutupGroupMember = function(groupId, userId, duration) {
+        this.queueAction("shutupGroupMember",{
+            "groupId": groupId,
+            "userId": userId,
+            "duration": duration
+        });
+    };
 
-            for(var i = recentMessages.length - 1; i >= 0; i--) {
-                if(recentMessages[i].user != currentUserId) continue;
-                if(prevMsg === null || recentMessages[i].msg === prevMsg) equalCount++;
-                else break;
-                prevMsg = recentMessages[i].msg;
-            }
+    this.setMemberCard = function(groupId, userId, content) {
+        this.queueAction("setMemberCard",{
+            "groupId": groupId,
+            "userId": userId,
+            "content": content
+        });
+    };
+
+    this.flushActionQueue = function() {
+        var resp = JSON.stringify(this.actionQueue);
+        this.actionQueue = [];
+        return resp;
+    };
+
+    this.onFlushActionQueue = function(callback) {
+        callback(this.flushActionQueue());
+    };
+
+    this.specialPatts = [
+        {
+            pattern: new RegExp("禁言"),
+            handler: kwdetector.doShutupGroupMemberOnKw
+        },
+        {
+            pattern: new RegExp("^\/google"),
+            handler: kwdetector.doGoogleOnKw
+        },
+        {
+            pattern: new RegExp("^\/baidu"),
+            handler: kwdetector.doBaiduOnKw
+        },
+        {
+            pattern: new RegExp("^\/whoami$"),
+            handler: kwdetector.doWhoamiOnKw
+        },
+        {
+            pattern: new RegExp("^\/ping"),
+            handler: kwdetector.doPingOnKw
+        },
+        {
+            pattern: new RegExp("^\/mtr"),
+            handler: kwdetector.doMtrOnKw
         }
+    ];
 
-        if(equalCount >= 5) {
-            shutupGroupMember(groupId,userId,180);
-            sendGroupMessage(groupId,"[CQ:at,qq="+userId.toString()+"] 发送相同内容消息过多，已禁言。");
-            return;
-        } else if(equalCount >= 3) {
-            sendGroupMessage(groupId,"[CQ:at,qq="+userId.toString()+"] 请勿刷屏。");
-            return;
-        }
-
-        for(id in specialPatts) {
-            var patt = specialPatts[id];
+    this.onMsgInput = function(reqRawData) {
             try {
-                if(patt.pattern.test(msg)) patt.handler(groupId,userId,msg);
+                var reqData = JSON.parse(reqRawData,"utf-8");
             } catch(e) {
-                console.log(e);
+                return;
             }
-        }
 
-        var startsWithChat_patt = new RegExp("^\/chat");
+            try {
+                if(typeof(reqData.userId) != "number") var userId = parseInt(reqData.userId);
+                else var userId = reqData.userId;
 
-        if(startsWithChat_patt.test(msg)) turingBotRequest(crypto.createHash("sha256").update(userId.toString() + groupId.toString()).digest("hex").substring(0,8),msg,function(rv) {
-            sendGroupMessage(groupId, rv);
-        });
+                if(typeof(reqData.groupId) != "number") var groupId = parseInt(reqData.groupId);
+                else var groupId = reqData.groupId;
+
+                var msg = reqData.msg;
+            } catch(e) {
+                return;
+            }
+
+            if(!userId || !groupId || !msg) {
+                return;
+            }
+
+            if(typeof(msg) != "string") {
+                this.sendGroupMessage(groupId, "Invalid message value type");
+                return;
+            }
+
+            console.log("[RECV] ["+groupId.toString()+"] "+msg);
+
+            var currentUserId = groupId.toString() + "#" + userId.toString();
+
+            this.recentMessages.push({
+                user: currentUserId,
+                msg: msg
+            });
+
+            var equalCount = 0;
+
+            if(this.recentMessages.length >= 1) {
+                var prevMsg = null;
+
+                for(var i = this.recentMessages.length - 1; i >= 0; i--) {
+                    if(this.recentMessages[i].user != currentUserId) continue;
+                    if(prevMsg === null || this.recentMessages[i].msg === prevMsg) equalCount++;
+                    else break;
+                    prevMsg = this.recentMessages[i].msg;
+                }
+            }
+
+            if(equalCount >= 5) {
+                this.shutupGroupMember(groupId,userId,180);
+                this.sendGroupMessage(groupId,"[CQ:at,qq="+userId.toString()+"] 发送相同内容消息过多，已禁言。");
+                return;
+            } else if(equalCount >= 3) {
+                this.sendGroupMessage(groupId,"[CQ:at,qq="+userId.toString()+"] 请勿刷屏。");
+                return;
+            }
+
+            for(id in this.specialPatts) {
+                var patt = this.specialPatts[id];
+                try {
+                    if(patt.pattern.test(msg)) patt.handler(groupId,userId,msg,this);
+                } catch(e) {
+                    console.log(e);
+                }
+            }
+
+            var startsWithChat_patt = new RegExp("^\/chat");
+
+            if(startsWithChat_patt.test(msg)) turingBotRequest(crypto.createHash("sha256").update(userId.toString() + groupId.toString()).digest("hex").substring(0,8),msg,function(rv,targetClass) {
+                targetClass.sendGroupMessage(groupId, rv);
+            },this);
+    };
+
+    return this;
 }
 
-apihub.init([
-    "qqGroupMsgInput",
-    "qqGroupFlushActionQueue"
-],function(reqData,callback) {
-    console.log("API request: "+reqData.apiName);
-    switch(reqData.apiName) {
-        case "qqGroupMsgInput":
-            onMsgInput(reqData.requestData);
-            callback("OK");
-            break;
-        case "qqGroupFlushActionQueue":
-            onFlushActionQueue(callback);
-            break;
+var tokenMappings = {};
+
+function onMsgInput_withToken(reqRawData) {
+    try {
+        var reqData = JSON.parse(reqRawData,"utf-8");
+    } catch(e) {
+        return;
     }
-})
+
+    if(!reqData.token || typeof(reqData.token) != "string") return;
+
+    target = tokenMappings[reqData.token];
+    if(!target) return;
+
+    target.onMsgInput(reqRawData);
+}
+
+function onFlushActionQueue_withToken(reqRawData, callback) {
+    try {
+        var reqData = JSON.parse(reqRawData,"utf-8");
+    } catch(e) {
+        callback("[]")
+        return;
+    }
+
+    if(!reqData.token || typeof(reqData.token) != "string") {
+        callback("[]");
+        return;
+    }
+
+    target = tokenMappings[reqData.token];
+    if(!target) {
+        callback("[]");
+        return;
+    }
+
+    target.onFlushActionQueue(callback);
+}
+
+function onProvideStudentServiceCenter_withToken(reqRawData) {
+    try {
+        var reqData = JSON.parse(reqRawData,"utf-8");
+    } catch(e) {
+        return;
+    }
+
+    if(!reqData.token || typeof(reqData.token) != "string") return;
+
+    target = tokenMappings[reqData.token];
+    if(!target) return;
+
+    studentServiceCenter.startPullMessageQueue(target);
+}
+
+function generateToken() {
+    var token = randomstring.generate(16);
+
+    tokenMappings[token] = new RemoteTarget();
+
+    dbContext.collection("tokens").insert({
+        "token": token,
+        "enabled": 1
+    },function(err,result){});
+
+    return token;
+}
+
+dbClient.connect("mongodb://127.0.0.1:27017/MicroService_qqGroupBot",function(err, db) {
+    if(err) {
+        throw "Error while connecting to database";
+    }
+
+    dbContext = db;
+
+    dbContext.collection("tokens").find({"enabled":1}).toArray(function(err,result) {
+        for(var key in result) {
+            tokenMappings[result[key].token] = new RemoteTarget();
+        }
+        apihub.init([
+            "qqGroupGetToken",
+            "qqGroupMsgInput",
+            "qqGroupFlushActionQueue",
+            "qqGroupProvideStudentServiceCenter"
+        ],function(reqData,callback) {
+            console.log("API request: "+reqData.apiName);
+            switch(reqData.apiName) {
+                case "qqGroupGetToken":
+                    callback(generateToken());
+                    break;
+                case "qqGroupMsgInput":
+                    onMsgInput_withToken(reqData.requestData);
+                    callback("OK");
+                    break;
+                case "qqGroupFlushActionQueue":
+                    onFlushActionQueue_withToken(reqData.requestData,callback);
+                    break;
+                case "qqGroupProvideStudentServiceCenter":
+                    onProvideStudentServiceCenter_withToken(reqData.requestData);
+                    callback("OK");
+                    break;
+            }
+        });
+    });
+});
